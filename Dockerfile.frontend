@@ -1,0 +1,15 @@
+FROM node:22-bookworm-slim
+
+WORKDIR /app/frontend
+
+COPY frontend/package.json frontend/package-lock.json frontend/tsconfig.json frontend/tsconfig.app.json frontend/tsconfig.node.json frontend/vite.config.ts frontend/index.html ./
+RUN npm ci --legacy-peer-deps
+
+COPY frontend/public ./public
+COPY frontend/src ./src
+COPY frontend/components.json ./
+COPY frontend/eslint.config.js ./
+
+EXPOSE 5173
+
+CMD ["npm", "run", "dev", "--", "--host", "0.0.0.0", "--port", "5173"]

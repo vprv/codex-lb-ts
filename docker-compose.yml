@@ -1,0 +1,33 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: codex-lm-ts-backend
+    environment:
+      HOST: 0.0.0.0
+      PORT: 2455
+      DB_PATH: /data/codex-lm-ts.db
+      OAUTH_CALLBACK_HOST: 0.0.0.0
+      OAUTH_CALLBACK_PORT: 1455
+      OAUTH_REDIRECT_URI: http://localhost:1455/auth/callback
+    ports:
+      - "2455:2455"
+      - "1455:1455"
+    volumes:
+      - codex_lm_ts_data:/data
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    container_name: codex-lm-ts-frontend
+    environment:
+      API_PROXY_TARGET: http://backend:2455
+    depends_on:
+      - backend
+    ports:
+      - "5173:5173"
+
+volumes:
+  codex_lm_ts_data:
