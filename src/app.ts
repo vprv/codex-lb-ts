@@ -19,8 +19,15 @@ export function buildApp(config: AppConfig) {
   const oauthService = new OAuthService(db, config);
   const proxyService = new ProxyService(db, oauthService);
   const app = Fastify({
-    logger: true
+    logger: true,
+    bodyLimit: 50 * 1024 * 1024 // 50 MB - allow images (base64) via /v1/responses
   });
+
+  // #region agent log
+  app.addHook("onRequest", async (request) => {
+    fetch('http://127.0.0.1:7277/ingest/0281294a-ee27-481e-845d-e430a58d489a',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'0e9738'},body:JSON.stringify({sessionId:'0e9738',location:'src/app.ts:onRequest',message:'Request received',data:{url:request.url,method:request.method,contentLength:request.headers['content-length']},timestamp:Date.now(),hypothesisId:'A'})}).catch(()=>{});
+  });
+  // #endregion
 
   app.register(cors, { origin: true });
 
@@ -37,7 +44,7 @@ export function buildApp(config: AppConfig) {
       const authHeader = request.headers.authorization;
       const expected = `Bearer ${settings.proxyApiKey}`;
       if (authHeader !== expected) {
-        reply.code(401).send({
+        return reply.code(401).send({
           error: {
             message: "Invalid proxy API key",
             type: "invalid_api_key"
@@ -134,6 +141,10 @@ export function buildApp(config: AppConfig) {
 
   app.get("/v1/models", async () => proxyService.listModels());
   app.get("/backend-api/codex/models", async () => proxyService.listModels());
+
+  app.post<{ Body: Record<string, unknown> }>("/v1/chat/completions", async (request, reply) => {
+    await proxyService.proxyChatCompletions(request, reply);
+  });
 
   app.post<{ Body: Record<string, unknown> }>("/v1/responses", async (request, reply) => {
     responsesRequestSchema.parse(request.body);

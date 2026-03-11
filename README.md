@@ -191,6 +191,24 @@ curl -N -X POST http://127.0.0.1:2455/backend-api/codex/responses \
   }'
 ```
 
+## Cherry Studio
+
+The proxy supports [Cherry Studio](https://github.com/CherryHQ/cherry-studio) via both the **OpenAI Responses API** and Chat Completions.
+
+### Using Responses API (recommended)
+
+1. In Cherry Studio, go to **Settings → Providers** and add a new provider.
+2. Choose **OpenAI** (Responses API) — not "OpenAI-Compatible".
+3. Set **API Base URL** to `http://localhost:2455` (or your backend URL). Do not add `/v1` — Cherry Studio appends it.
+4. Set **API Key** to your proxy API key (from dashboard Settings) if you enabled proxy auth.
+5. Add the Codex models (e.g. `gpt-5.3-codex`) and enable the provider.
+
+Cherry Studio will send requests to `POST /v1/responses`, which the proxy forwards to Codex. The Responses API format is compatible with Codex.
+
+### Using Chat Completions
+
+If you prefer **OpenAI-Compatible** (Chat Completions), use the same base URL. The proxy adapts requests to Codex and transcodes the streamed response.
+
 ## Main Endpoints
 
 - `GET /health`
@@ -206,6 +224,7 @@ curl -N -X POST http://127.0.0.1:2455/backend-api/codex/responses \
 - `GET /api/dashboard/summary`
 - `GET /api/request-logs`
 - `GET /v1/models`
+- `POST /v1/chat/completions` (Cherry Studio / OpenAI Chat Completions)
 - `POST /v1/responses`
 - `GET /backend-api/codex/models`
 - `POST /backend-api/codex/responses`

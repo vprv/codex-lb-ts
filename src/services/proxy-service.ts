@@ -4,6 +4,11 @@ import type { AppDatabase } from "../db.js";
 import type { OAuthService } from "./oauth-service.js";
 import { NoEligibleAccountsError, pickAccount } from "./load-balancer.js";
 import type { AccountRecord, ProxyAttemptResult } from "../types.js";
+import {
+  chatCompletionsToCodex,
+  createResponseTranscoder,
+  type ChatCompletionsBody
+} from "./chat-adapter.js";
 
 const RETRYABLE_STATUS_CODES = new Set([401, 408, 409, 429, 500, 502, 503, 504]);
 
@@ -29,12 +34,99 @@ export class ProxyService {
     return safeJson(response);
   }
 
+  /**
+   * Proxies Chat Completions API requests (e.g. from Cherry Studio) by converting
+   * to Codex format and transcoding the response stream to Chat Completions SSE.
+   */
+  public async proxyChatCompletions(
+    request: FastifyRequest<{ Body: Record<string, unknown> }>,
+    reply: FastifyReply
+  ): Promise<void> {
+    const body = (request.body ?? {}) as unknown as ChatCompletionsBody;
+    const model = typeof body.model === "string" ? body.model : null;
+    const requestId = request.id;
+    const startedAt = Date.now();
+
+    if (!body.messages || !Array.isArray(body.messages) || body.messages.length === 0) {
+      reply.code(400).send({
+        error: { message: "messages is required and must be a non-empty array", type: "invalid_request_error" }
+      });
+      return;
+    }
+
+    const codexBody = chatCompletionsToCodex(body);
+    const stream = codexBody.stream;
+
+    try {
+      const result = await this.tryProxy(
+        "/responses",
+        request.headers,
+        codexBody as unknown as Record<string, unknown>,
+        model
+      );
+      this.db.touchAccount(result.account.id);
+
+      const contentType = result.response.headers.get("content-type");
+      reply.code(result.response.status);
+      reply.header("x-codex-lm-account-id", result.account.id);
+
+      if (contentType?.includes("text/event-stream") && stream && result.response.body) {
+        reply.header("content-type", "text/event-stream");
+        const transcoder = createResponseTranscoder("");
+        const nodeStream = Readable.fromWeb(
+          result.response.body.pipeThrough(transcoder) as never
+        );
+        reply.hijack();
+        nodeStream.on("data", (chunk) => reply.raw.write(chunk));
+        nodeStream.on("end", () => reply.raw.end());
+        nodeStream.on("error", (err) => reply.raw.destroy(err));
+      } else if (!result.response.ok) {
+        const errBody = await safeJsonOrText(result.response);
+        reply.send(errBody);
+      } else {
+        reply.send(await safeJsonOrText(result.response));
+      }
+
+      this.db.insertRequestLog({
+        id: crypto.randomUUID(),
+        requestId,
+        accountId: result.account.id,
+        route: request.routeOptions.url ?? request.url,
+        model,
+        statusCode: result.response.status,
+        outcome: result.response.ok ? "success" : "error",
+        latencyMs: Date.now() - startedAt,
+        errorMessage: result.response.ok ? null : `Upstream responded with ${result.response.status}`
+      });
+    } catch (error) {
+      const statusCode = error instanceof NoEligibleAccountsError ? 503 : 502;
+      this.db.insertRequestLog({
+        id: crypto.randomUUID(),
+        requestId,
+        accountId: null,
+        route: request.routeOptions.url ?? request.url,
+        model,
+        statusCode,
+        outcome: "error",
+        latencyMs: Date.now() - startedAt,
+        errorMessage: error instanceof Error ? error.message : "Unknown proxy error"
+      });
+      reply.code(statusCode).send({
+        error: {
+          message: error instanceof Error ? error.message : "Unknown proxy error",
+          type: "proxy_error"
+        }
+      });
+    }
+  }
+
   public async proxyResponses(
     request: FastifyRequest<{ Body: Record<string, unknown> }>,
     reply: FastifyReply,
     upstreamPath: "/responses"
   ): Promise<void> {
-    const body = request.body ?? {};
+    const rawBody = request.body ?? {};
+    const body = normalizeResponsesBody(rawBody);
     const model = typeof body.model === "string" ? body.model : null;
     const requestId = request.id;
     const startedAt = Date.now();
@@ -176,6 +268,26 @@ export class ProxyService {
 
     reply.send(await safeJsonOrText(result.response));
   }
+}
+
+/**
+ * Normalizes Responses API body for Codex upstream. Codex requires `instructions`;
+ * Cherry Studio may omit it when empty.
+ */
+function normalizeResponsesBody(body: Record<string, unknown>): Record<string, unknown> {
+  const cleaned: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(body)) {
+    if (value !== undefined && value !== null) {
+      cleaned[key] = value;
+    }
+  }
+  if (
+    !cleaned.instructions ||
+    (typeof cleaned.instructions === "string" && cleaned.instructions.trim() === "")
+  ) {
+    cleaned.instructions = "You are a helpful assistant.";
+  }
+  return cleaned;
 }
 
 function filterRequestHeaders(headers: FastifyRequest["headers"]): HeadersInit {
